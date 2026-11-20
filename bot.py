@@ -3,7 +3,7 @@ stay quiet, face threats and fight only when found.  VARIANT: A zone only, B +ev
 import math
 import mechfight as mf
 
-VARIANT = "C"
+VARIANT = "D"
 
 
 def ang_diff(a, b):
@@ -20,7 +20,95 @@ class Bot:
         self.threat_yaw = None
         self.threat_until = -1.0
 
+    def act_d(self, obs):
+        """Variant D: fight like the starter (it beats hiding) plus zone discipline, pickups, lead aim, strafing."""
+        me = obs["self"]
+        x, y, z = me["pos"]
+        t, tick = obs["t"], obs["tick"]
+        zone = obs["zone"]
+        act = {"tick": tick}
+        if obs["offer"]:
+            ids = [c["id"] for c in obs["offer"]["choices"]]
+            act["pick"] = ids.index("armor") if "armor" in ids else (ids.index("gun_rate") if "gun_rate" in ids else 0)
+        nc, nr = zone["next_center"], zone["next_radius"]
+        cc, cr = zone["center"], zone["radius"]
+        d_next = math.dist((x, y), nc)
+        boost = False
+        # zone bias vector (toward the circle we must end up in)
+        zx, zy = 0.0, 0.0
+        if not me["in_zone"]:
+            zx, zy = cc[0] - x, cc[1] - y
+            boost = me["energy"] > 20
+        elif d_next > nr * 0.8:
+            zx, zy = nc[0] - x, nc[1] - y
+        zn = math.hypot(zx, zy) or 1.0
+        zx, zy = zx / zn, zy / zn
+        zone_need = (not me["in_zone"]) or d_next > nr * 0.8
+
+        weapons = me["weapons"]
+        held = {w["kind"] for w in weapons if w}
+        enemies = sorted((m for m in obs["mechs"] if m["kind"] == "mech"), key=lambda m: math.dist(m["pos"][:2], (x, y)))
+        mv = [zx * 0.8, zy * 0.8] if zone_need else [0.0, 0.0]
+        aim = None
+        fire = [False, False]
+
+        # weapon pickups: take any new kind that is close
+        free = [p for p in obs["pickups"] if p["kind"] != "gun" and p["kind"] not in held]
+        if free and (weapons[1] is None or weapons[0] is None):
+            p = min(free, key=lambda q: math.dist(q["pos"][:2], (x, y)))
+            dp = math.dist(p["pos"][:2], (x, y))
+            if dp < self.reach:
+                act["take"] = p["id"]
+            elif dp < 60 and not enemies:
+                a = math.atan2(p["pos"][1] - y, p["pos"][0] - x)
+                mv = [math.cos(a), math.sin(a)]
+
+        if enemies:
+            e = enemies[0]
+            ex, ey, ez = e["pos"]
+            d = math.dist((ex, ey), (x, y))
+            ux, uy = (ex - x) / (d or 1.0), (ey - y) / (d or 1.0)
+            vx, vy = e.get("vel", [0, 0, 0])[:2]
+            lead = d / 252.0
+            aim = [math.atan2(ey + vy * lead - y, ex + vx * lead - x), math.atan2((ez + 4.5) - (z + 7.0), max(d, 1.0))]
+            s = 1.0 if (tick // 15) % 2 == 0 else -1.0
+            radial = -0.7 if d < 30 else (0.4 if d > 80 else 0.0)
+            mv = [-uy * s * 0.9 + ux * radial + zx * 0.4, ux * s * 0.9 + uy * radial + zy * 0.4]
+            g = weapons[0]
+            fire[0] = bool(g) and d < 220
+            w1 = weapons[1]
+            if w1:
+                k = w1["kind"]
+                if k == "lightning":
+                    fire[1] = d < 44
+                elif k == "laser":
+                    fire[1] = d < 250 and (tick % 10) < 8
+                elif k == "mortar":
+                    fire[1] = d < 200
+                    if d < 200:
+                        aim[1] = 0.5 * math.asin(min(1.0, 22.0 * d / 5184.0))
+            act["jump"] = tick % 35 == 0
+        elif t < self.threat_until and self.threat_yaw is not None:
+            aim = [self.threat_yaw, 0.0]
+        else:
+            self.scan += 0.4
+            base = math.atan2(nc[1] - y, nc[0] - x)
+            aim = [base + math.sin(self.scan) * 1.6, 0.0]
+            if not zone_need:
+                mv = [0.0, 0.0]
+        for ev in obs["events"]:
+            if ev["type"] == "damaged" and ev.get("bearing") is not None:
+                self.threat_yaw, self.threat_until = ev["bearing"], t + 3.0
+        gun = weapons[0]
+        if not enemies and gun and gun.get("ammo", 12) < 6 and gun.get("reload", 0) == 0:
+            act["reload"] = True
+        act.update(move=mv, boost=boost, aim=aim, fire=fire)
+        mf.draw.label(f"D hp {me['hp']:.0f} alive {obs['alive']}")
+        return act
+
     def act(self, obs):
+        if VARIANT == "D":
+            return self.act_d(obs)
         me = obs["self"]
         x, y, z = me["pos"]
         t = obs["t"]

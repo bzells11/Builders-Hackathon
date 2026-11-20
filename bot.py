@@ -3,7 +3,7 @@ stay quiet, face threats and fight only when found.  VARIANT: A zone only, B +ev
 import math
 import mechfight as mf
 
-VARIANT = "A"
+VARIANT = "C"
 
 
 def ang_diff(a, b):

@@ -3,7 +3,15 @@ stay quiet, face threats and fight only when found.  VARIANT: A zone only, B +ev
 import math
 import mechfight as mf
 
-VARIANT = "D"
+VARIANT = "E"
+# One-flag experiments on top of D. Each submission turns on exactly one more flag so the board shows its value.
+FLAGS = {
+    "walk_to_loot": True,    # D bug: walking to a pickup/drop was cancelled by the idle branch
+    "flee_low_hp": False,    # below 40% HP, boost away from the enemy toward the zone
+    "kite": False,           # keep 55-110 m instead of 30-80 m
+    "focus_low_hp": False,   # shoot the weakest visible enemy within 150 m, not the nearest
+    "drops": False,          # walk to a supply drop inside the next circle
+}
 
 
 def ang_diff(a, b):
@@ -48,9 +56,15 @@ class Bot:
         weapons = me["weapons"]
         held = {w["kind"] for w in weapons if w}
         enemies = sorted((m for m in obs["mechs"] if m["kind"] == "mech"), key=lambda m: math.dist(m["pos"][:2], (x, y)))
+        if FLAGS["focus_low_hp"] and len(enemies) > 1:
+            near = [m for m in enemies if math.dist(m["pos"][:2], (x, y)) < 150]
+            if near:
+                low = min(near, key=lambda m: m.get("hp", 9999))
+                enemies = [low] + [m for m in enemies if m is not low]
         mv = [zx * 0.8, zy * 0.8] if zone_need else [0.0, 0.0]
         aim = None
         fire = [False, False]
+        steering = False
 
         # weapon pickups: take any new kind that is close
         free = [p for p in obs["pickups"] if p["kind"] != "gun" and p["kind"] not in held]
@@ -62,6 +76,14 @@ class Bot:
             elif dp < 60 and not enemies:
                 a = math.atan2(p["pos"][1] - y, p["pos"][0] - x)
                 mv = [math.cos(a), math.sin(a)]
+                steering = True
+        if FLAGS["drops"] and not enemies:
+            for dr in obs["drops"]:
+                if dr.get("holder") in (None, me["id"]) and math.dist(dr["pos"][:2], nc) < nr and dr.get("lands_in", 99) < 12:
+                    a = math.atan2(dr["pos"][1] - y, dr["pos"][0] - x)
+                    mv = [math.cos(a), math.sin(a)]
+                    steering = True
+                    break
 
         if enemies:
             e = enemies[0]
@@ -72,8 +94,14 @@ class Bot:
             lead = d / 252.0
             aim = [math.atan2(ey + vy * lead - y, ex + vx * lead - x), math.atan2((ez + 4.5) - (z + 7.0), max(d, 1.0))]
             s = 1.0 if (tick // 15) % 2 == 0 else -1.0
-            radial = -0.7 if d < 30 else (0.4 if d > 80 else 0.0)
+            if FLAGS["kite"]:
+                radial = -0.7 if d < 55 else (0.5 if d > 110 else 0.0)
+            else:
+                radial = -0.7 if d < 30 else (0.4 if d > 80 else 0.0)
             mv = [-uy * s * 0.9 + ux * radial + zx * 0.4, ux * s * 0.9 + uy * radial + zy * 0.4]
+            if FLAGS["flee_low_hp"] and me["hp"] < 0.4 * me["max_hp"] and d < 140:
+                mv = [-ux * 0.9 + zx * 0.4, -uy * 0.9 + zy * 0.4]
+                boost = me["energy"] > 15
             g = weapons[0]
             fire[0] = bool(g) and d < 220
             w1 = weapons[1]
@@ -94,7 +122,7 @@ class Bot:
             self.scan += 0.4
             base = math.atan2(nc[1] - y, nc[0] - x)
             aim = [base + math.sin(self.scan) * 1.6, 0.0]
-            if not zone_need:
+            if not zone_need and not (FLAGS["walk_to_loot"] and steering):
                 mv = [0.0, 0.0]
         for ev in obs["events"]:
             if ev["type"] == "damaged" and ev.get("bearing") is not None:
@@ -103,11 +131,11 @@ class Bot:
         if not enemies and gun and gun.get("ammo", 12) < 6 and gun.get("reload", 0) == 0:
             act["reload"] = True
         act.update(move=mv, boost=boost, aim=aim, fire=fire)
-        mf.draw.label(f"D hp {me['hp']:.0f} alive {obs['alive']}")
+        mf.draw.label(f"{VARIANT} hp {me['hp']:.0f} alive {obs['alive']}")
         return act
 
     def act(self, obs):
-        if VARIANT == "D":
+        if VARIANT >= "D":
             return self.act_d(obs)
         me = obs["self"]
         x, y, z = me["pos"]

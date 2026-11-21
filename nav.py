@@ -27,23 +27,8 @@ class Map:
         self.nx = int((self.x1 - self.x0) / CELL) + 1
         self.ny = int((self.y1 - self.y0) / CELL) + 1
         self.cols = {}  # cell index -> list of (base, top)
-        self.roofs = []  # (cx, cy, top, height_above_ground, area, ring)
         for p in w["prisms"]:
             self._fill(p)
-            if p["kind"] == "building" and not p.get("holes"):
-                r = p["ring"]
-                n = len(r) // 2
-                a = cx = cy = 0.0
-                for k in range(n):
-                    x0_, y0_ = r[2 * k], r[2 * k + 1]
-                    x1_, y1_ = r[2 * ((k + 1) % n)], r[2 * ((k + 1) % n) + 1]
-                    c = x0_ * y1_ - x1_ * y0_
-                    a += c
-                    cx += (x0_ + x1_) * c
-                    cy += (y0_ + y1_) * c
-                if abs(a) > 1e-6:
-                    cx, cy, a = cx / (3 * a), cy / (3 * a), abs(a) / 2
-                    self.roofs.append((cx, cy, p["top"], p["top"] - self.ground(cx, cy), a, r))
         self._walk_grid()
         self.flow = None
         self.flow_goal = None
@@ -105,40 +90,6 @@ class Map:
                 if b <= z <= t:
                     return True
         return False
-
-    def top_at(self, x, y):
-        """Highest building top over this point, or None."""
-        i = int((x - self.x0) / CELL)
-        j = int((y - self.y0) / CELL)
-        c = self.cols.get(j * self.nx + i)
-        return max(t for _, t in c) if c else None
-
-    def good_roofs(self, cx, cy, r, hmin=12.0, hmax=50.0, amin=250.0):
-        """Flat roofs whose middle is inside the circle (cx, cy, r) and reachable with a jet."""
-        out = []
-        for rx, ry, top, h, a, ring in self.roofs:
-            if hmin <= h <= hmax and a >= amin and math.hypot(rx - cx, ry - cy) < r:
-                tt = self.top_at(rx, ry)
-                if tt is not None and abs(tt - top) < 0.5:
-                    out.append((rx, ry, top, h, a, ring))
-        return out
-
-    @staticmethod
-    def edge_point(ring, px, py):
-        """Closest point on a ring's outline to (px, py)."""
-        n = len(ring) // 2
-        best, bp = 1e18, (ring[0], ring[1])
-        for k in range(n):
-            ax, ay = ring[2 * k], ring[2 * k + 1]
-            bx, by = ring[2 * ((k + 1) % n)], ring[2 * ((k + 1) % n) + 1]
-            dx, dy = bx - ax, by - ay
-            L = dx * dx + dy * dy
-            f = 0.0 if L == 0 else max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / L))
-            qx, qy = ax + dx * f, ay + dy * f
-            d = (qx - px) ** 2 + (qy - py) ** 2
-            if d < best:
-                best, bp = d, (qx, qy)
-        return bp
 
     def los(self, a, b, step=CELL):
         """True when the segment a->b (3D points) passes no building column and stays above ground."""

@@ -1,4 +1,6 @@
-"""Mech Royale bot, team 2.3%. Variant H ("assassin brain").
+"""Mech Royale bot, team 2.3%. Variant L: J ("blend": I's awareness + reasoner rules with F's farming) plus the fight read (brain/situation.py:
+run or stay from who has a line on us, who is coming and who wins the trade, never from an HP line), laser kit.
+H was the first agent brain, I added awareness + the reasoner.
 
 The mech is a small set of agents under a harness (see brain/):
   world.py    world model: who sees us, who has a line on us, chance to stay unseen, cover spots
@@ -25,7 +27,7 @@ except Exception:
 
 from brain.harness import Harness  # noqa: E402
 
-VARIANT = "H"
+VARIANT = "L"
 
 
 def load_params():

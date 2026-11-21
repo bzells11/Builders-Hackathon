@@ -11,6 +11,7 @@ farm    drones and crates for cubes, only where no one would see us
 drift   nothing else to do: ease toward the next circle out of sight, look around
 """
 import math
+import random
 from .world import ang_diff, unit, role
 
 
@@ -115,11 +116,9 @@ class EscapeAgent(Agent):
         self.reached = False
 
     def propose(self, w):
-        if w.ffa:
-            return None
         sh = w.shooters
-        low = w.me["hp"] < self.p["low_hp"] * w.me["max_hp"] and w.t - w.dmg_t < 2.0 and sh
-        if len(sh) >= self.p["min_shooters"] or low:
+        rd = getattr(w, "fight_read", None) or {}
+        if rd.get("verdict") == "run":
             self.until = w.t + self.p["hold_s"]
         running = getattr(w, "stance", None) == "run"
         if running:
@@ -194,72 +193,54 @@ class CombatAgent(Agent):
         return ok, p, len(others), esc
 
     def propose(self, w):
-        if not w.enemies:
+        R = getattr(w, "intent", None) or {}
+        it, fid = R.get("intent"), R.get("focus")
+        if it not in ("strike", "fight") or fid is None:
             self.striking = None
             return None
-        # 1) a fight we are already in: one shooter on us, or FFA rules
-        if w.alerted and w.shooters:
-            pool = [e for e in w.enemies if w.los(w.muz, (e["pos"][0], e["pos"][1], e["pos"][2] + 4.5))]
-            if pool:
-                e = min(pool, key=lambda e: e["_d"] + 0.05 * e.get("hp", 1400))
-                return self.p["bid"], self.duel(w, e)
-        # 2) a strike on an unaware target from behind
-        sr = self.strike_range(w)
-        best = None
-        for e in w.enemies:
-            d = e["_d"]
-            if d > sr + 2:
-                continue
-            ex, ey, ez = e["pos"]
-            if not w.los(w.muz, (ex, ey, ez + 4.5)):
-                continue
-            rear = abs(ang_diff(math.atan2(w.y - ey, w.x - ex), e["aim"][0]))
-            unaware = not w.sees(e, w.x, w.y, w.z, near_pad=0.0, cone_pad=0.0)
-            if not (unaware or rear > 1.75):
-                continue
-            if best is None or (rear, -d) > best[0]:
-                best = ((rear, -d), e)
-        if best is None:
-            self.striking = None
+        e = next((m for m in w.enemies if m["id"] == fid), None)
+        if e is None:
             return None
-        e = best[1]
+        if it == "fight":
+            return self.p["bid"], self.duel(w, e, R.get("fire_ok", True))
         if self.striking != e["id"]:
-            ok, p, n_others, esc = self.gate(w, e)
-            if not ok:
-                return None
             self.striking = e["id"]
-            w.log("strike", p=round(p, 2), others=n_others, esc=esc, tgt=e["id"], d=round(e["_d"]), kit=self.kit.get("strike"))
-        return self.p["bid"], self.strike(w, e, sr)
+            others = w.others_with_line(w.x, w.y, w.z, ignore=e["id"])
+            w.log("strike", p=round(w.p_undetected(w.x, w.y, w.z, ignore=e["id"]), 2), others=len(others),
+                  esc=True, tgt=e["id"], d=round(e["_d"]), ttk=R.get("ttk"))
+        kr = w.reasoner.kill_range(w, w.tracker.tracks.get(e["id"], e)) or 40.0
+        return self.p["bid"], self.strike(w, e, kr, R.get("fire_ok", False))
 
-    def strike(self, w, e, sr):
+    def strike(self, w, e, kr, fire_ok):
         ex, ey, ez = e["pos"]
         d = e["_d"]
         yaw, pitch, tz = lead_aim(w, e)
         aim = [yaw, pitch]
         tol = math.atan2(2.2, max(d, 1.0)) + 0.02
         f1, aim = secondary_fire(w, e, d, yaw, aim, tol)
-        fire = [gun_fire_ok(w, ex, ey, tz, d, yaw), f1]
+        fire = [gun_fire_ok(w, ex, ey, tz, d, yaw) and fire_ok, f1 and fire_ok]
         face = e["aim"][0]
         bx, by = math.cos(face), math.sin(face)
         vx, vy = (e.get("vel") or [0, 0, 0])[:2]
-        hold = min(sr * 0.6, 30.0) if w.lrange else min(sr * 0.8, 120.0)
+        hold = max(20.0, kr * 0.6)   # close in: shorter range = faster kill
         px, py = ex - bx * hold + vx * 0.4, ey - by * hold + vy * 0.4
         mv = list(unit(px - w.x, py - w.y)) if math.dist((px, py), (w.x, w.y)) > 3 else [vx / 12.0, vy / 12.0]
         rear = abs(ang_diff(math.atan2(w.y - ey, w.x - ex), face))
         boost = w.lrange is not None and rear < 1.75 and w.me["energy"] > 30
         return plan(mv, aim, fire, boost, note="strike")
 
-    def duel(self, w, e):
+    def duel(self, w, e, fire_ok=True):
         ex, ey, ez = e["pos"]
         d = e["_d"]
         yaw, pitch, tz = lead_aim(w, e)
         aim = [yaw, pitch]
         tol = math.atan2(2.2, max(d, 1.0)) + 0.02
         f1, aim = secondary_fire(w, e, d, yaw, aim, tol)
+        f1 = f1 and fire_ok
         g = w.weapons[0]
-        f0 = bool(g) and g.get("reload", 0) == 0 and d < (g.get("stats") or {}).get("range", 230) \
+        f0 = fire_ok and bool(g) and g.get("reload", 0) == 0 and d < (g.get("stats") or {}).get("range", 230) \
             and abs(ang_diff(w.me["aim"][0], yaw)) < tol * 2.5 and w.los(w.muz, (ex, ey, tz))
-        prefer = 30.0 if w.sec == "lightning" else 90.0 if w.sec == "laser" else 110.0 if w.sec == "mortar" else 70.0
+        prefer = 30.0 if w.sec == "lightning" else 55.0   # close the distance: kills come faster up close
         ux, uy = unit(ex - w.x, ey - w.y)
         if (w.tick - self.strafe_t) > 14 + (w.tick % 7):
             self.strafe, self.strafe_t = -self.strafe, w.tick
@@ -292,12 +273,15 @@ class LootAgent(Agent):
             dd = math.dist(p["pos"][:2], (w.x, w.y))
             if dd > self.p["see_r"] or abs(p["pos"][2] - w.z) > 6:
                 continue
-            if dd > 25 and w.p_undetected(p["pos"][0], p["pos"][1], p["pos"][2]) < self.p["min_p"]:
+            rush = (getattr(w, "intent", None) or {}).get("intent") == "get weapon"
+            if dd > 25 and not rush and w.p_undetected(p["pos"][0], p["pos"][1], p["pos"][2]) < self.p["min_p"]:
                 continue
             s = dd + rank[k] * 40
             if best is None or s < best[0]:
                 best = (s, p, dd)
         bid = self.p["bid"] + (0.15 if w.sec is None else 0.0)
+        if (getattr(w, "intent", None) or {}).get("intent") == "get weapon":
+            bid += 0.35
         if best is not None:
             _, p, dd = best
             mv = list(w.goto(p["pos"][0], p["pos"][1]))
@@ -357,32 +341,31 @@ class StealthAgent(Agent):
         return best
 
     def propose(self, w):
-        if not w.enemies or (w.alerted and w.shooters):
+        R = getattr(w, "intent", None) or {}
+        if R.get("intent") != "stalk" or R.get("focus") is None:
             return None
-        e = self.pick_prey(w)
+        e = next((m for m in w.enemies if m["id"] == R["focus"]), None)
         if e is None:
-            near = w.enemies[0]
-            zv = w.goto(*w.zone["next_center"]) if w.d_next > w.zone["next_radius"] * 0.5 else (0.0, 0.0)
-            return self.p["bid"] * 0.8, plan(w.unseen_step(zv), [math.atan2(near["pos"][1] - w.y, near["pos"][0] - w.x), 0.0], note="hide")
+            return None
         ex, ey, ez = e["pos"]
         d = e["_d"]
         face = e["aim"][0]
         rear = abs(ang_diff(math.atan2(w.y - ey, w.x - ex), face))
-        sr = (w.lrange - 3.0) if w.lrange else 38.0
-        if self.kit.get("strike") in ("far", "gun"):
-            sr = 120.0
+        kr = w.reasoner.kill_range(w, w.tracker.tracks.get(e["id"], e)) or 40.0
         if rear < 1.9:   # in front or to the side: swing wide, outside 45 m and its cone
             side = 1.0 if ang_diff(math.atan2(w.y - ey, w.x - ex), face) > 0 else -1.0
             a = face + side * 2.1
             r = max(w.near + 20.0, min(d, 90.0))
             gx, gy = ex + math.cos(a) * r, ey + math.sin(a) * r
         else:
-            gx, gy = ex - math.cos(face) * sr * 0.8, ey - math.sin(face) * sr * 0.8
+            gx, gy = ex - math.cos(face) * kr * 0.8, ey - math.sin(face) * kr * 0.8
         mv = list(w.goto(gx, gy))
-        mv = w.unseen_step(mv)
-        boost = d > self.p["quiet_r"] and w.me["energy"] > 40 and mv != [0.0, 0.0]
+        m2 = w.unseen_step(mv)
+        mv = m2 if m2 != [0.0, 0.0] else [mv[0] * 0.4, mv[1] * 0.4]   # never freeze: creep if every step is seen
+        boost = d > self.p["quiet_r"] and w.me["energy"] > 40 and m2 != [0.0, 0.0]
         yaw = math.atan2(ey - w.y, ex - w.x)
-        return self.p["bid"], plan(mv, [yaw, math.atan2(ez + 4.5 - w.muz[2], max(d, 1.0))], boost=boost, note="stalk %d" % e["id"])
+        return self.p["bid"], plan(mv, [yaw, math.atan2(ez + 4.5 - w.muz[2], max(d, 1.0))], boost=boost,
+                                   note="stalk #%d to %d m" % (e["id"], kr))
 
 
 # ------------------------------------------------------------------------------------------------------------
@@ -392,7 +375,11 @@ class FarmAgent(Agent):
     def propose(self, w):
         if w.me["cubes"] >= self.p["max_cubes"] or (w.ffa and w.t > 120) or w.enemies:
             return None
-        if w.watchers and w.p_undetected(w.x, w.y, w.z) < self.p["min_p"]:
+        if (getattr(w, "intent", None) or {}).get("intent") not in (None, "rotate", "get weapon"):
+            return None
+        if w.tracker.near(w.x, w.y, self.p.get("clear_r", 120.0), max_age=8.0):
+            return None
+        if w.watchers and w.p_undetected(w.x, w.y, w.z) < self.p.get("min_p", 0.0):
             return None
         cc, cr = w.zone["center"], w.zone["radius"]
         cand = []
@@ -429,28 +416,49 @@ class FarmAgent(Agent):
 
 # ------------------------------------------------------------------------------------------------------------
 class DriftAgent(Agent):
+    """Rotate: never camp. Head for the next circle, then keep moving through it on fresh waypoints; boost when
+    no one is near so we cover ground fast; keep out of known enemies' view."""
     name = "drift"
 
     def __init__(self, p, kit):
         super().__init__(p, kit)
         self.scan = 0.0
+        self.wp = None
+        self.wp_t = -99.0
+        self.rng = random.Random(7)
 
     def propose(self, w):
         nc, nr = w.zone["next_center"], w.zone["next_radius"]
-        mv = [0.0, 0.0]
-        if w.d_next > nr * 0.5:
-            gx, gy = w.goto(nc[0], nc[1])
-            mv = [gx * 0.8, gy * 0.8]
-            m2 = w.unseen_step(mv)
-            if m2 != [0.0, 0.0]:
-                mv = m2
+        x, y = w.x, w.y
+        if w.d_next > nr * 0.45:
+            tx, ty = nc[0], nc[1]
+            self.wp = None
+        else:
+            if self.wp is None or math.dist(self.wp, (x, y)) < 8 or w.t - self.wp_t > 14 or math.dist(self.wp, nc) > nr * 0.7:
+                cx, cy = nc[0], nc[1]
+                for _ in range(12):
+                    a = self.rng.random() * 2 * math.pi
+                    r = nr * 0.6 * math.sqrt(self.rng.random())
+                    cx, cy = nc[0] + math.cos(a) * r, nc[1] + math.sin(a) * r
+                    if w.walkable(cx, cy) and math.dist((cx, cy), (x, y)) > 40:
+                        break
+                self.wp, self.wp_t = (cx, cy), w.t
+            tx, ty = self.wp
+        mv = list(w.goto(tx, ty))
+        m2 = w.unseen_step(mv)
+        if m2 != [0.0, 0.0]:
+            mv = m2
+        near = w.tracker.near(x, y, 120.0, max_age=8.0)
+        boost = not near and w.me["energy"] > 45
         if w.t < w.threat_until and w.threat_yaw is not None:
             aim = [w.threat_yaw, 0.0]
         else:
             self.scan += 0.35
-            base = math.atan2(nc[1] - w.y, nc[0] - w.x) if w.d_next > 5 else 0.0
-            aim = [base + math.sin(self.scan) * 1.7, 0.0]
-        return self.p["bid"], plan(mv, aim, note="drift")
+            aim = [math.atan2(ty - y, tx - x) + math.sin(self.scan) * 1.2, 0.0]
+        bid = self.p["bid"]
+        if (getattr(w, "intent", None) or {}).get("intent") in ("rotate", "get weapon"):
+            bid += 0.3
+        return bid, plan(mv, aim, boost=boost, note="to circle" if self.wp is None else "patrol")
 
 
 ALL = [ZoneAgent, EscapeAgent, CombatAgent, LootAgent, StealthAgent, FarmAgent, DriftAgent]

@@ -10,6 +10,9 @@ import os
 import time
 
 from .world import World, ang_diff
+from .tracker import Tracker
+from .reasoner import Reasoner
+from . import situation
 from . import agents as A
 
 
@@ -20,6 +23,10 @@ class Harness:
         self.kit = params["kits"][self.kit_id]
         self.w = World(hello, nav_map)
         self.w.log = self.log
+        self.tracker = Tracker(self.w)
+        self.reasoner = Reasoner(params["reasoner"])
+        self.w.tracker, self.w.reasoner = self.tracker, self.reasoner
+        self.w.intent = {}
         self.agents = [cls(params["agents"][cls.name], self.kit) for cls in A.ALL]
         self.cur = None
         self.sticky = params.get("harness", {}).get("sticky", 0.08)
@@ -32,7 +39,7 @@ class Harness:
         # run-or-stay: decided whenever there is a threat, then locked so the mech sticks with it
         hp_ = params.get("harness", {})
         self.lock_s = hp_.get("lock_s", 3.0)
-        self.panic_hp = hp_.get("panic_hp", 0.2)
+        self.stay_joining = 0
         self.stance = None          # None | "run" | "stay"
         self.stance_until = -1.0
         self.stance_why = ""
@@ -59,21 +66,13 @@ class Harness:
             pass
 
     def decide_stance(self, w):
-        """Run or stay. Re-weighed every decision, but once picked it holds for lock_s seconds; only a panic (HP under
-        panic_hp, or 3+ shooters) can turn 'stay' into 'run' early. 'run' never flips back early."""
-        me = w.me
+        """Run or stay, from the fight read (brain/situation.py: who has a line on us, who is coming, who wins the
+        trade), never from an HP line. Re-weighed every decision; once picked it holds for lock_s seconds. Only a
+        read that turns badly against us (lost outright, or new enemies joined) can turn 'stay' into 'run' early."""
         esc = self.P["agents"]["escape"]
-        sh = len(w.shooters)
-        threat = w.alerted and (sh > 0 or w.t - w.dmg_t < 2.0)
-        low = me["hp"] < esc["low_hp"] * me["max_hp"] and w.t - w.dmg_t < 2.0
-        if not threat:
-            want, why = None, "no one on us"
-        elif sh >= esc["min_shooters"] or low:
-            want, why = "run", ("%d have a line on us" % sh) if sh >= esc["min_shooters"] else "low HP under fire"
-        else:
-            want, why = "stay", "one on one" if sh == 1 else "hit, attacker unseen"
-        if w.ffa and want == "run":
-            want, why = "stay", "free-for-all: no squad to run from"
+        rd = situation.read(w, self.tracker, self.reasoner, esc)
+        w.fight_read = rd
+        want, why = rd["verdict"], rd["why"]
         # calm: clear the stance after 1.5 s with no threat and no lock
         if want is None:
             self.calm_since = self.calm_since if self.calm_since is not None else w.t
@@ -83,7 +82,7 @@ class Harness:
             if want:
                 self.set_stance(w, want, why)
         elif w.t < self.stance_until:
-            panic = me["hp"] < self.panic_hp * me["max_hp"] or sh >= 3
+            panic = rd["margin"] is not None and (rd["margin"] <= 0.0 or rd["joining"] > self.stay_joining)
             if self.stance == "stay" and panic and want == "run":
                 self.set_stance(w, "run", "panic: " + why)
         else:
@@ -98,6 +97,8 @@ class Harness:
     def set_stance(self, w, s, why):
         self.log("stance", stance=s, why=why, prev=self.stance, lock=self.lock_s)
         self.stance, self.stance_why, self.stance_until = s, why, w.t + self.lock_s
+        rd = getattr(w, "fight_read", None) or {}
+        self.stay_joining = rd.get("joining", 0)
 
     def pick_upgrade(self, offer):
         ids = [c["id"] for c in offer["choices"]]
@@ -132,8 +133,13 @@ class Harness:
             self.log("spot", by=[e["id"] for e in w.seen_by], n_line=len([e for e in w.recent if w.has_line(e, w.x, w.y, w.z)]))
         self.was_seen = seen
 
+        self.tracker.update()
         want, why = self.decide_stance(w)
         w.stance, w.stance_until = self.stance, self.stance_until
+        R, changed = self.reasoner.decide(w, self.tracker, self.stance)
+        w.intent = R
+        if changed:
+            self.log("reason", intent=R["intent"], focus=R["focus"], ttk=R["ttk"], fire_ok=R["fire_ok"], why=R["why"])
 
         # agents bid, the harness picks; the locked stance outranks everyone else
         best, bp = None, None
@@ -171,7 +177,9 @@ class Harness:
             self.think_t = w.t
             self.log("think", stance=self.stance, lock=round(max(0.0, self.stance_until - w.t), 1), want=want, why=why,
                      bids=bids, hp=round(me["hp"]), seen=len(w.seen_by), sh=len(w.shooters),
-                     p=round(w.p_undetected(w.x, w.y, w.z), 2), note=chosen.get("note", ""), sec=w.sec)
+                     p=round(w.p_undetected(w.x, w.y, w.z), 2), note=chosen.get("note", ""), sec=w.sec,
+                     intent=R["intent"], reason=R["why"], focus=R["focus"], ttk=R["ttk"], fire_ok=R["fire_ok"],
+                     tracks=self.tracker.view(), read=getattr(w, "fight_read", None))
 
         act = {"tick": w.tick}
         if obs["offer"]:

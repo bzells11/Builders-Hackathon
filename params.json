@@ -109,6 +109,35 @@
         "capacitor"
       ],
       "strike": "gun"
+    },
+    "blend": {
+      "name": "Blend (I rules + F farming)",
+      "secondary": [
+        "lightning",
+        "laser",
+        "mortar"
+      ],
+      "upgrades": [
+        "armor",
+        "plating",
+        "nanites",
+        "gun_damage",
+        "lightning_range",
+        "lightning_efficiency",
+        "laser_damage",
+        "gun_rate",
+        "servos",
+        "gun_mag",
+        "capacitor",
+        "reactor",
+        "gyros",
+        "sensors",
+        "gun_velocity",
+        "jets",
+        "laser_charge",
+        "lightning_chain"
+      ],
+      "strike": "close"
     }
   },
   "agents": {
@@ -117,9 +146,8 @@
     },
     "escape": {
       "bid": 0.9,
-      "min_shooters": 2,
+      "min_shooters": 3,
       "hold_s": 2.0,
-      "low_hp": 0.35,
       "tune": {
         "min_shooters": [
           1,
@@ -131,12 +159,25 @@
           4.0,
           0.5
         ],
-        "low_hp": [
-          0.2,
-          0.5,
+        "win_margin": [
+          0.0,
+          0.4,
           0.05
+        ],
+        "join_r": [
+          60.0,
+          200.0,
+          20.0
+        ],
+        "join_w": [
+          0.2,
+          1.0,
+          0.1
         ]
-      }
+      },
+      "win_margin": 0.15,
+      "join_r": 120.0,
+      "join_w": 0.5
     },
     "combat": {
       "bid": 0.8,
@@ -208,21 +249,26 @@
       }
     },
     "farm": {
-      "bid": 0.4,
+      "bid": 0.55,
       "max_cubes": 14,
-      "min_p": 0.7,
       "tune": {
         "max_cubes": [
           6,
           20,
           2
         ],
-        "min_p": [
-          0.4,
-          0.95,
+        "clear_r": [
+          60.0,
+          200.0,
+          20.0
+        ],
+        "bid": [
+          0.3,
+          0.8,
           0.05
         ]
-      }
+      },
+      "clear_r": 120.0
     },
     "drift": {
       "bid": 0.1
@@ -231,18 +277,54 @@
   "harness": {
     "sticky": 0.08,
     "lock_s": 3.0,
-    "panic_hp": 0.2,
     "tune": {
       "lock_s": [
         1.5,
         6.0,
         0.5
-      ],
-      "panic_hp": [
-        0.1,
-        0.35,
-        0.05
       ]
     }
+  },
+  "reasoner": {
+    "ttk_max": 6.0,
+    "ttk_easy": 2.0,
+    "max_crowd": 1,
+    "crowd_r": 110.0,
+    "engage_p": 0.7,
+    "quiet_until": 30,
+    "weapon_rush_s": 60,
+    "tune": {
+      "ttk_max": [
+        2.5,
+        6.0,
+        0.5
+      ],
+      "ttk_easy": [
+        1.0,
+        3.0,
+        0.5
+      ],
+      "max_crowd": [
+        0,
+        2,
+        1
+      ],
+      "quiet_until": [
+        30,
+        120,
+        15
+      ],
+      "weapon_rush_s": [
+        45,
+        150,
+        15
+      ],
+      "fight_close": [
+        40.0,
+        120.0,
+        10.0
+      ]
+    },
+    "fight_close": 70.0
   }
 }

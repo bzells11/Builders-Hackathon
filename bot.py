@@ -17,9 +17,10 @@ try:
 except Exception:  # never let the map module stop the bot
     nav = None
 
-VARIANT = "F"
+VARIANT = "G"
 FLAGS = {
-    "farm": True,          # hunt NPC drones / crates / cubes when no enemy mech is in sight
+    "farm": False,         # hunt NPC drones / crates / cubes when no enemy mech is in sight
+    "roof": True,          # G: jet onto a tall roof inside the next circle and fight from there
     "drops": True,         # capture supply drops inside the next circle
     "ffa_detect": True,    # switch to FFA mode on an unexplained drop in `alive`
     "force_ffa": False,    # test FFA behavior on the practice board
@@ -68,6 +69,8 @@ class Bot:
         self.last_dmg_t = -99.0
         self.strafe = 1.0
         self.strafe_t = 0
+        self.roof = None
+        self.roof_pick_t = -99.0
 
     # ------------------------------------------------------------------ helpers
     def los(self, a, b):
@@ -242,8 +245,11 @@ class Bot:
                     mv = [gx * 0.8, gy * 0.8]
                     mode = "drift"
 
+        if FLAGS["roof"] and self.map is not None and me["in_zone"]:
+            mv, jump, boost, mode = self.roof_override(obs, me, mv, jump, boost, mode, nc, nr)
+
         # --- unstick: commanded to move but not moving
-        if self.last_pos is not None and math.hypot(mv[0], mv[1]) > 0.5:
+        if mode not in ("roof", "climb") and self.last_pos is not None and math.hypot(mv[0], mv[1]) > 0.5:
             if math.dist(self.last_pos, (x, y)) < 0.25:
                 self.stuck_t += 0.1
             else:
@@ -270,6 +276,55 @@ class Bot:
         act.update(move=mv, boost=boost, aim=aim, fire=fire, jump=jump)
         mf.draw.label(f"{VARIANT}{'*' if self.ffa else ''} {mode} hp {me['hp']:.0f} c{me['cubes']}")
         return act
+
+    # ------------------------------------------------------------------ rooftop fortress
+    def roof_override(self, obs, me, mv, jump, boost, mode, nc, nr):
+        x, y, z = me["pos"]
+        R = self.roof
+        if R is not None and math.dist(R[:2], nc) > nr - 10:
+            R = None
+        if R is None and obs["t"] - self.roof_pick_t > 3:
+            self.roof_pick_t = obs["t"]
+            best = None
+            for r in self.map.good_roofs(nc[0], nc[1], nr * 0.8):
+                ex_, ey_ = self.map.edge_point(r[5], x, y)
+                cost = math.dist((ex_, ey_), (x, y)) + r[3] * 2.0 - min(r[4], 2000) * 0.02
+                if best is None or cost < best[0]:
+                    best = (cost, r)
+            R = best[1] if best else None
+        self.roof = R
+        if R is None:
+            return mv, jump, boost, mode
+        rx, ry, top, h, area, ring = R
+        tt = self.map.top_at(x, y)
+        on_roof = tt is not None and abs(tt - top) < 0.6 and z > top - 1.0
+        dcx = math.dist((x, y), (rx, ry))
+        if on_roof:
+            tx, ty = unit(rx - x, ry - y)
+            k = min(1.0, dcx / 8.0)
+            if mode == "fight":
+                # small dodge, but stay near the middle so ground units lose sight of us
+                mv = [mv[0] * 0.35 + tx * k, mv[1] * 0.35 + ty * k]
+            else:
+                mv = [tx * k, ty * k]
+            return mv, False, False, ("fight" if mode == "fight" else "roof")
+        ex_, ey_ = self.map.edge_point(ring, x, y)
+        de = math.dist((ex_, ey_), (x, y))
+        need_e = 1.7 * max(0.0, top - z) + 8
+        if de > 6.5 and z < top - 1.0:
+            gx, gy = self.goto(x, y, ex_, ey_)
+            if mode == "fight":
+                mv = [mv[0] * 0.4 + gx * 0.6, mv[1] * 0.4 + gy * 0.6]
+            else:
+                mv = [gx, gy]
+            return mv, jump, False, ("fight" if mode == "fight" else "toroof")
+        tx, ty = unit(rx - x, ry - y)
+        if me["grounded"] and z < top - 1.0:
+            if me["energy"] < need_e:
+                return [tx * 0.2, ty * 0.2], False, False, ("fight" if mode == "fight" else "charge")
+            return [tx, ty], True, False, "climb"
+        # in the air: jet up along the wall, then over the edge
+        return [tx, ty], False, me["energy"] > 1 and z < top + 2.0, "climb"
 
     # ------------------------------------------------------------------ goals when no enemy is in sight
     def pick_goal(self, obs, me, cc, cr, held):
